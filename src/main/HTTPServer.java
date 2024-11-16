@@ -1,12 +1,15 @@
+import javax.xml.namespace.QName;
 import java.io.*;
 import java.net.*;
 import java.nio.CharBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 public class HTTPServer {
+
 	public static void main(String[] args) {
 		// Set the port number
 		int port = 6789;
@@ -53,23 +56,29 @@ class HttpRequestHandler implements Runnable {
 			String requestLine = sb.toString();
 
 			System.out.println("Received request: " + requestLine);
+
+			// Now that I've received the whole request line I'm going to parse the request into an HttpRequest object.
 			HttpRequest request;
 			try {
 				request = new HttpRequest(requestLine);
 			} catch (IOException e) {
-				HttpResponse response = new HttpResponse(HttpResponseCode.BAD_REQUEST, null, null);
+				HttpResponse response = new HttpResponse(HttpResponseCode.BAD_REQUEST, null);
 				System.out.println("Response line: " + response);
 				os.writeBytes(response.toString());
 				throw new IOException("Bad request");
 			} catch (UnsupportedOperationException e) {
-				HttpResponse response = new HttpResponse(HttpResponseCode.METHOD_NOT_ALLOWED, null, null);
+				HttpResponse response = new HttpResponse(HttpResponseCode.METHOD_NOT_ALLOWED, null);
 				System.out.println("Response line: " + response);
 				os.writeBytes(response.toString());
 				throw new IOException("Unsupported method");
 			}
 
-			HttpResponse response = new HttpResponse(HttpResponseCode.OK, Map.of("Content-Type", "text/plain"), "Hello, world! All is good in the hood!");
-			os.writeBytes(response.toString());
+			HttpResponse response = handleRequest(request);
+			System.out.println("Response line: " + response);
+
+//			os.writeUTF(response.toString());
+			response.write(os);
+			os.flush();
 		} catch (IOException e) {
 			System.err.println("Request handling exception: " + e.getMessage());
 			e.printStackTrace();
@@ -80,6 +89,83 @@ class HttpRequestHandler implements Runnable {
 				System.err.println("Socket closing exception: " + e.getMessage());
 			}
 		}
+	}
+
+	private HttpResponse handleRequest(HttpRequest request)  {
+		HttpResponse response;
+//		response = new HttpResponse(HttpResponseCode.OK, Map.of("Content-Type", "text/plain"), "Hello, world! All is good in the hood!");
+
+		switch (request.method) {
+			case GET:
+				response = handleGet(request);
+				break;
+			case POST:
+				response = handlePost(request);
+				break;
+			default:
+				return new HttpResponse(HttpResponseCode.METHOD_NOT_ALLOWED, null, "Method not allowed");
+		}
+
+		return response;
+	}
+
+	private HttpResponse handleGet(HttpRequest request)  {
+		String sanitizedUrl = sanitizeResourceUrl(request.url);
+
+
+		File resource = new File(sanitizedUrl);
+		if (!resource.exists()) {
+			return new HttpResponse(HttpResponseCode.NOT_FOUND, null, "Resource not found. Code: 00");
+		}
+
+		byte[] data;
+
+		try (FileInputStream fis = new FileInputStream(resource)) {
+			data = fis.readAllBytes();
+		} catch (IOException e) {
+			return new HttpResponse(HttpResponseCode.NOT_FOUND, null, "Resource not found. Code: 01");
+		}
+
+		String contentType = contentType(sanitizedUrl);
+
+		return new HttpResponse(HttpResponseCode.OK, Map.of("Content-Type", contentType, "Content-Length", Integer.toString(data.length)), data);
+	}
+
+	private HttpResponse handlePost(HttpRequest request)  {
+		return null;
+	}
+
+	private String contentType(String file) {
+		String[] split = file.split("\\.");
+		String extension = split[split.length - 1];
+		switch (extension) {
+			case "html":
+				return "text/html";
+			case "jpg":
+			case "jpeg":
+				return "image/jpeg";
+			case "png":
+				return "image/png";
+			case "gif":
+				return "image/gif";
+			case "json":
+				return "application/json";
+			case "tif":
+				return "image/tiff";
+			case "zip":
+				return "application/zip";
+			case "txt":
+			default:
+				return "text/plain";
+		}
+	}
+
+	private String sanitizeResourceUrl(String url) {
+		String sanitizedUrl = url.replace("\\.\\.\\/", "\\/");
+		if (sanitizedUrl.startsWith("/")) {
+			sanitizedUrl = sanitizedUrl.substring(1);
+		}
+		return sanitizedUrl;
 	}
 }
 
@@ -106,16 +192,34 @@ class HttpResponse {
 
 	public final HttpResponseCode responseCode;
 	public final Map<String, String> headers;
-	public final String body;
+	public final byte[] body;
 
-	HttpResponse(HttpResponseCode responseCode, Map<String, String> headers, String body) {
+	HttpResponse(HttpResponseCode responseCode, Map<String, String> headers, byte[] body) {
 		this.responseCode = responseCode;
 		this.headers = headers;
 		this.body = body;
 	}
 
-	@Override
-	public String toString() {
+	HttpResponse(HttpResponseCode responseCode, Map<String, String> headers, String body) {
+		this.responseCode = responseCode;
+		this.headers = headers;
+		this.body = body.getBytes(StandardCharsets.UTF_8);
+	}
+
+	HttpResponse(HttpResponseCode responseCode, Map<String, String> headers) {
+		this.responseCode = responseCode;
+		this.headers = headers;
+		this.body = null;
+	}
+
+	public void write(DataOutputStream os) throws IOException {
+		os.writeUTF(toStringWithoutBody());
+		if (body != null) {
+			os.write(body);
+		}
+	}
+
+	private String toStringWithoutBody() {
 		StringBuilder sb = new StringBuilder();
 		sb.append("HTTP/1.1")
 				.append(SPACE)
@@ -131,9 +235,15 @@ class HttpResponse {
 		}
 
 		sb.append(DELIMETER);
+		return sb.toString();
+	}
+
+	@Override
+	public String toString() {
+		StringBuilder sb = new StringBuilder(toStringWithoutBody());
 
 		if(body != null) {
-			sb.append(body);
+			sb.append(new String(body));
 		}
 		return sb.toString();
 	}
@@ -179,7 +289,7 @@ class HttpRequest {
 
 		List<String> headers = new ArrayList<>();
 		String header;
-		while(reader.ready() && (header = reader.readLine()) != null) {
+		while(reader.ready() && (header = reader.readLine()) != null && !header.isBlank()) {
 			headers.add(header);
 		}
 
@@ -196,14 +306,15 @@ class HttpRequest {
 	private Map<String, String> parseHeaders(List<String> headers) throws IOException {
 		Map<String, String> headerMap = new HashMap<>();
 		for (String header : headers) {
-			if (header.isEmpty() || header.isBlank()) {
+			if (header.isBlank()) {
 				return headerMap;
 			}
 			String[] pair = header.split(HEADER_DELIMETER);
-			if (pair.length != 2) {
+			if (pair.length < 2) {
 				throw new IOException("Malformed headers!");
 			}
-			headerMap.put(pair[0].trim(), pair[1].trim());
+			String rest = header.substring(pair[0].length() + 1).trim();
+			headerMap.put(pair[0].trim(), rest);
 		}
 		return headerMap;
 	}
