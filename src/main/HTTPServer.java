@@ -1,7 +1,6 @@
-import javax.xml.namespace.QName;
 import java.io.*;
-import java.net.*;
-import java.nio.CharBuffer;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -91,9 +90,8 @@ class HttpRequestHandler implements Runnable {
 		}
 	}
 
-	private HttpResponse handleRequest(HttpRequest request)  {
+	private HttpResponse handleRequest(HttpRequest request) {
 		HttpResponse response;
-//		response = new HttpResponse(HttpResponseCode.OK, Map.of("Content-Type", "text/plain"), "Hello, world! All is good in the hood!");
 
 		switch (request.method) {
 			case GET:
@@ -109,13 +107,12 @@ class HttpRequestHandler implements Runnable {
 		return response;
 	}
 
-	private HttpResponse handleGet(HttpRequest request)  {
+	private HttpResponse handleGet(HttpRequest request) {
 		String sanitizedUrl = sanitizeResourceUrl(request.url);
-
 
 		File resource = new File(sanitizedUrl);
 		if (!resource.exists()) {
-			return new HttpResponse(HttpResponseCode.NOT_FOUND, null, "Resource not found. Code: 00");
+			return new HttpResponse(HttpResponseCode.NOT_FOUND, null, "Resource not found");
 		}
 
 		byte[] data;
@@ -123,7 +120,7 @@ class HttpRequestHandler implements Runnable {
 		try (FileInputStream fis = new FileInputStream(resource)) {
 			data = fis.readAllBytes();
 		} catch (IOException e) {
-			return new HttpResponse(HttpResponseCode.NOT_FOUND, null, "Resource not found. Code: 01");
+			return new HttpResponse(HttpResponseCode.NOT_FOUND, null, "Resource not found");
 		}
 
 		String contentType = contentType(sanitizedUrl);
@@ -131,8 +128,30 @@ class HttpRequestHandler implements Runnable {
 		return new HttpResponse(HttpResponseCode.OK, Map.of("Content-Type", contentType, "Content-Length", Integer.toString(data.length)), data);
 	}
 
-	private HttpResponse handlePost(HttpRequest request)  {
-		return null;
+	private HttpResponse handlePost(HttpRequest request) {
+		String sanitizedUrl = sanitizeResourceUrl(request.url);
+
+		if (request.body == null) {
+			return new HttpResponse(HttpResponseCode.BAD_REQUEST, null, "Bad request");
+		}
+
+		BufferedReader bodyReader = new BufferedReader(new StringReader(request.body));
+		Map<String, String> bodyMap = new HashMap<>();
+		String token;
+		try {
+			while ((token = bodyReader.readLine()) != null) {
+				String[] split = token.split(":");
+				bodyMap.put(split[0].trim(), token.substring(split[0].length() + 1).trim());
+			}
+		} catch (IOException e) {
+			return new HttpResponse(HttpResponseCode.BAD_REQUEST, null, "Bad request");
+		}
+
+		if ("detail-form".equals(sanitizedUrl) && bodyMap.containsKey("name")) {
+			return new HttpResponse(HttpResponseCode.OK, null, "Your request has been received, " + bodyMap.get("name") + "!");
+		}
+
+		return new HttpResponse(HttpResponseCode.BAD_REQUEST, null, "Bad request");
 	}
 
 	private String contentType(String file) {
@@ -178,6 +197,7 @@ enum HttpResponseCode {
 
 	public final int statusCode;
 	public final String statusMessage;
+
 	HttpResponseCode(int statusCode, String statusMessage) {
 		this.statusCode = statusCode;
 		this.statusMessage = statusMessage;
@@ -242,7 +262,7 @@ class HttpResponse {
 	public String toString() {
 		StringBuilder sb = new StringBuilder(toStringWithoutBody());
 
-		if(body != null) {
+		if (body != null) {
 			sb.append(new String(body));
 		}
 		return sb.toString();
@@ -289,7 +309,7 @@ class HttpRequest {
 
 		List<String> headers = new ArrayList<>();
 		String header;
-		while(reader.ready() && (header = reader.readLine()) != null && !header.isBlank()) {
+		while (reader.ready() && (header = reader.readLine()) != null && !header.isBlank()) {
 			headers.add(header);
 		}
 

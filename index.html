@@ -3,7 +3,13 @@
         <link rel="stylesheet" href="styles.css">
     </head>
     <script>
-
+        function onSubmit() {
+            let http = new XMLHttpRequest();
+            http.open("POST", "/detail-form", false);
+            let body = "name: " + document.getElementById("nameInput").value + "\nage: " + document.getElementById("ageInput").value;
+            http.send(body);
+            console.log("Response: ", http.response);
+        }
     </script>
     <body>
         <div class="wrapper">
@@ -11,9 +17,9 @@
                 HTTP WebServer POST form.
             </p>
             <div class="input-form">
-                <input #nameInput type="text" placeholder="Please input your name"/>
-                <input #ageInput type="text" placeholder="Please input your age"/>
-                <button #submitButton>Submit</button>
+                <input id="nameInput" type="text" placeholder="Please input your name"/>
+                <input id="ageInput" type="text" placeholder="Please input your age"/>
+                <button onclick="onSubmit()">Submit</button>
             </div>
 
         </div>
