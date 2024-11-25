@@ -1,36 +1,66 @@
+import javax.net.ssl.SSLServerSocketFactory;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class HTTPServer {
 
 	public static void main(String[] args) {
-		// Set the port number
-		int port = 6789;
 
-		try (ServerSocket serverSocket = new ServerSocket(port)) {
-			System.out.println("HTTP Server running on port " + port);
+		Thread httpThread = new Thread(() -> {
+			int port = 80;
+			try (ServerSocket serverSocket = new ServerSocket(port)) {
+				System.out.println("HTTP Server running on port " + port);
 
-			// Infinite loop to listen for incoming connections
-			while (true) {
-				Socket clientSocket = serverSocket.accept();
+				// Infinite loop to listen for incoming connections
+				while (true) {
+					Socket clientSocket = serverSocket.accept();
 
-				// Create a new thread to handle the request
-				HttpRequestHandler requestHandler = new HttpRequestHandler(clientSocket);
-				Thread thread = new Thread(requestHandler);
-				thread.start();
+					// Create a new thread to handle the request
+					HttpRequestHandler requestHandler = new HttpRequestHandler(clientSocket);
+					Thread thread = new Thread(requestHandler);
+					thread.start();
+				}
+			} catch (IOException e) {
+				System.err.println("Server exception: " + e.getMessage());
+				e.printStackTrace();
 			}
-		} catch (IOException e) {
-			System.err.println("Server exception: " + e.getMessage());
-			e.printStackTrace();
-		}
+		});
+
+		Thread httpsThread = new Thread(() -> {
+			int port = 443;
+			try (ServerSocket serverSocket = SSLServerSocketFactory.getDefault().createServerSocket(port)) {
+				System.setProperty("javax.net.ssl.keyStore", "keystore.jks");
+				System.setProperty("javax.net.ssl.keyStorePassword", "changeit");
+				System.out.println("HTTP Server running on port " + port);
+
+				// Infinite loop to listen for incoming connections
+				while (true) {
+					Socket clientSocket = serverSocket.accept();
+
+					// Create a new thread to handle the request
+					HttpRequestHandler requestHandler = new HttpRequestHandler(clientSocket);
+					Thread thread = new Thread(requestHandler);
+					thread.start();
+				}
+			} catch (IOException e) {
+				System.err.println("Server exception: " + e.getMessage());
+				e.printStackTrace();
+			}
+
+		});
+
+		httpThread.start();
+		httpsThread.start();
+
 	}
 }
 
@@ -99,30 +129,31 @@ class HttpRequestHandler implements Runnable {
 			case GET:
 				response = handleGet(request);
 				break;
-			case POST:
-				response = handlePost(request);
-				break;
 			default:
-				return new HttpResponse(HttpResponseCode.METHOD_NOT_ALLOWED, null, "Method not allowed");
+				return new HttpResponse(HttpResponseCode.METHOD_NOT_ALLOWED, null);
 		}
 
 		return response;
 	}
 
 	private HttpResponse handleGet(HttpRequest request) {
-		String sanitizedUrl = sanitizeResourceUrl(request.url);
-
-		File resource = new File(sanitizedUrl);
-		if (!resource.exists()) {
-			return new HttpResponse(HttpResponseCode.NOT_FOUND, null, "Resource not found");
+		String sanitizedUrl = URLDecoder.decode(request.url, StandardCharsets.UTF_8);
+		Path currentPath = Paths.get("").toAbsolutePath(); //pwd
+		Path resourcePath = Paths.get(currentPath.toString(), sanitizedUrl);
+		System.out.printf("Resource: %s\nCurrent: %s\n", resourcePath, currentPath);
+		if (!resourcePath.startsWith(currentPath)) {
+			// Cheap way to check we're in a valid resource path. Using the URL decoder already handles most required sanitizations
+			return new HttpResponse(HttpResponseCode.FORBIDDEN, null);
 		}
 
 		byte[] data;
 
-		try (FileInputStream fis = new FileInputStream(resource)) {
-			data = fis.readAllBytes();
+		try {
+			data = getFileData(resourcePath);
+		} catch (FileNotFoundException e) {
+			return new HttpResponse(HttpResponseCode.NOT_FOUND, null);
 		} catch (IOException e) {
-			return new HttpResponse(HttpResponseCode.NOT_FOUND, null, "Resource not found");
+			return new HttpResponse(HttpResponseCode.BAD_REQUEST, null);
 		}
 
 		String contentType = contentType(sanitizedUrl);
@@ -130,33 +161,7 @@ class HttpRequestHandler implements Runnable {
 		return new HttpResponse(HttpResponseCode.OK, Map.of("Content-Type", contentType, "Content-Length", Integer.toString(data.length)), data);
 	}
 
-	private HttpResponse handlePost(HttpRequest request) {
-		String sanitizedUrl = sanitizeResourceUrl(request.url);
-
-		if (request.body == null) {
-			return new HttpResponse(HttpResponseCode.BAD_REQUEST, null, "Bad request");
-		}
-
-		BufferedReader bodyReader = new BufferedReader(new StringReader(request.body));
-		Map<String, String> bodyMap = new HashMap<>();
-		String token;
-		try {
-			while ((token = bodyReader.readLine()) != null) {
-				String[] split = token.split(":");
-				bodyMap.put(split[0].trim(), token.substring(split[0].length() + 1).trim());
-			}
-		} catch (IOException e) {
-			return new HttpResponse(HttpResponseCode.BAD_REQUEST, null, "Bad request");
-		}
-
-		if ("detail-form".equals(sanitizedUrl) && bodyMap.containsKey("name")) {
-			return new HttpResponse(HttpResponseCode.OK, null, "Your request has been received, " + bodyMap.get("name") + "!");
-		}
-
-		return new HttpResponse(HttpResponseCode.BAD_REQUEST, null, "Bad request");
-	}
-
-	private String contentType(String file) {
+	public static String contentType(String file) {
 		String[] split = file.split("\\.");
 		String extension = split[split.length - 1];
 		switch (extension) {
@@ -181,117 +186,40 @@ class HttpRequestHandler implements Runnable {
 		}
 	}
 
-	private String sanitizeResourceUrl(String url) {
-		String sanitizedUrl = url.replace("\\.\\.\\/", "\\/");
-		if (sanitizedUrl.startsWith("/")) {
-			sanitizedUrl = sanitizedUrl.substring(1);
-		}
-		return sanitizedUrl;
-	}
-}
-
-
-/*
-* Class for handling json parsing. Probably this is not the most efficient way to handle this, but it makes sense intuitively to me.
-* I tried to account for as much as I can reasonably think of including numeric representations incl. scientific, booleans, and strings.
-* I know this is overkill but I actually really enjoyed working on this.
-* Tested mostly w/ regex101.com. Might not handle overly complex models.
-* The one scenario I can't figure out a solution for is parsing an object nested within an array. Arrays within objects works fine.
-*
-* Basic Process:
-* 1. Parse through each key + value pair
-* 	a. If value is simple, just add it to the map
-*   b. If value is an array, parse the array, then add it to the map
-*   c. If value is an object, parse the object recursively by going back to step 1 by parsing the value as the new input string.
-* 		Once that object is parsed, add it to the map with a key/value pair
-*
-* */
-class Json {
-	private static final Pattern jsonObjectPattern = Pattern.compile("^\\s*\\{[\\s\\S]*\\}\\s*$");
-	private static final Pattern jsonPropertyPattern = Pattern.compile("\"(?<key>.*?)\"\\s*:\\s*(?<value>\".*?\"|\\d+|true|false|null|\\[.*?\\]|\\{[\\s\\S]*\\})");
-	private static final Pattern jsonArrayPattern = Pattern.compile("^\\[(?:[^\\[\\]]|[^,]+)*(?:,\\s*(?:[^\\[\\]]|[^,]+)*)*\\]$");
-	private static final Pattern jsonArrayElementPattern = Pattern.compile("(?<=\\[|\\G)(?:(?<element>\"[^\"\\\\]*(?:\\\\.[^\"\\\\]*)*\"|\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|true|false|null))(?:,\\s*)?");
-	private static final Pattern jsonValuePattern = Pattern.compile("^((\"(?<str>.+)\")|([^\"]+))$");
-
-	public static Map<String, Object> parseJson(String string) {
-		Matcher matcher = jsonPropertyPattern.matcher(string);
-
-
-		if (!jsonObjectPattern.matcher(string).matches()) {
-			throw new IllegalArgumentException("Invalid JSON syntax");
+	public static byte[] getFileData(Path resourcePath) throws IOException {
+		File resource = new File(resourcePath.toUri());
+		if (!resource.exists()) {
+			throw new FileNotFoundException();
 		}
 
-		Map<String, Object> result = new HashMap<>();
-		return parseJson(result, matcher);
-	}
+		byte[] data;
 
-	// Handles parsing of key-value pairs. Handles complex objects and arrays.
-	private static Map<String, Object> parseJson(Map<String, Object> result, Matcher matcher) {
-
-		while (matcher.find()) {
-			String key = matcher.group("key");
-			String value = matcher.group("value");
-			if (jsonObjectPattern.matcher(value).matches()) {
-				result.put(key, parseJson(new HashMap<>(), jsonPropertyPattern.matcher(value)));
-			} else if (jsonArrayPattern.matcher(value).matches()) {
-				result.put(key, parseArray(value));
-			} else {
-				result.put(key, getValue(value));
-			}
+		try (FileInputStream fis = new FileInputStream(resource)) {
+			data = fis.readAllBytes();
 		}
 
-		return result;
+		return data;
 	}
 
-	// Extracts the raw value if it is a string, otherwise leaves it untouched.
-	private static String getValue(String value) {
-		Matcher rawValueMatcher = jsonValuePattern.matcher(value);
-		if (!rawValueMatcher.matches()) {
-			throw new IllegalArgumentException("Invalid JSON syntax. Invalid value format!");
-		}
-
-		return rawValueMatcher.group("str") != null ? rawValueMatcher.group("str") : value;
-	}
-
-	// Handles parsing of arrays to get each element and handle parsing individually for complex objects / arrays
-	private static List<Object> parseArray(String string) {
-
-		Matcher matcher = jsonArrayElementPattern.matcher(string);
-
-		List<Object> result = new ArrayList<>();
-
-		while (matcher.find()) {
-			String element = matcher.group("element");
-			if (element != null) {
-				if (jsonObjectPattern.matcher(element).matches()) {
-					Map<String, Object> objectMap = parseJson(new HashMap<>(), jsonPropertyPattern.matcher(element));
-					result.add(objectMap);
-				} else if (jsonArrayPattern.matcher(element).matches()) {
-					List<Object> arrayList = parseArray(element);
-					result.add(arrayList);
-				} else {
-					result.add(getValue(element));
-				}
-			}
-		}
-
-		return result;
-	}
 }
 
 // This class is just constants used for sending responses back
 enum HttpResponseCode {
-	OK(200, "OK"),
-	BAD_REQUEST(400, "BAD REQUEST"),
-	NOT_FOUND(404, "NOT FOUND"),
-	METHOD_NOT_ALLOWED(405, "METHOD NOT ALLOWED");
+	OK(200, "OK", null),
+	BAD_REQUEST(400, "BAD REQUEST", Paths.get("400.html")),
+	FORBIDDEN(403, "FORBIDDEN", Paths.get("403.html")),
+	NOT_FOUND(404, "NOT FOUND", Paths.get("404.html")),
+	METHOD_NOT_ALLOWED(405, "METHOD NOT ALLOWED", Paths.get("403.html"));
 
 	public final int statusCode;
 	public final String statusMessage;
+	// This is the default path of a file to be served upon no body being declared!
+	public final Path defaultPath;
 
-	HttpResponseCode(int statusCode, String statusMessage) {
+	HttpResponseCode(int statusCode, String statusMessage, Path defaultPath) {
 		this.statusCode = statusCode;
 		this.statusMessage = statusMessage;
+		this.defaultPath = defaultPath;
 	}
 }
 
@@ -319,8 +247,30 @@ class HttpResponse {
 
 	HttpResponse(HttpResponseCode responseCode, Map<String, String> headers) {
 		this.responseCode = responseCode;
+
+		if (responseCode.defaultPath != null) {
+
+			byte[] data;
+			try {
+				data = HttpRequestHandler.getFileData(responseCode.defaultPath);
+			} catch (IOException ignored) {
+				// this shouldn't happen so we handle gracefully
+				data = null;
+			}
+			this.body = data;
+
+			if (data != null) {
+				String contentType = HttpRequestHandler.contentType(responseCode.defaultPath.toString());
+				if (headers == null) {
+					headers = new HashMap<>();
+				}
+				headers.putAll(Map.of("Content-Type", contentType, "Content-Length", Integer.toString(data.length)));
+			}
+		} else {
+			this.body = null;
+		}
+
 		this.headers = headers;
-		this.body = null;
 	}
 
 	public void write(DataOutputStream os) throws IOException {
@@ -387,7 +337,11 @@ class HttpRequest {
 	HttpRequest(String requestLine) throws IOException, UnsupportedOperationException {
 		BufferedReader reader = new BufferedReader(new StringReader(requestLine));
 		HttpMethod method;
-		String[] firstLine = reader.readLine().split(" ");
+		String first = reader.readLine();
+		if (first == null) {
+			throw new IOException("Bad request");
+		}
+		String[] firstLine = first.split(" ");
 
 		try {
 			method = HttpMethod.valueOf(firstLine[0].trim());

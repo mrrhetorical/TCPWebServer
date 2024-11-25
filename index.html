@@ -6,8 +6,11 @@
         function onSubmit() {
             let http = new XMLHttpRequest();
             http.open("POST", "/detail-form", false);
-            let body = "name: " + document.getElementById("nameInput").value + "\nage: " + document.getElementById("ageInput").value;
-            http.send(body);
+            let body = {
+                name: document.getElementById("nameInput").value,
+                age: document.getElementById("ageInput").value
+            };
+            http.send(JSON.stringify(body));
             console.log("Response: ", http.response);
         }
     </script>
