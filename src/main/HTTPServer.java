@@ -1,4 +1,6 @@
+import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLServerSocketFactory;
+import javax.net.ssl.SSLSocket;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -14,6 +16,8 @@ import java.util.Map;
 public class HTTPServer {
 
 	public static void main(String[] args) {
+
+		HttpsConfig config = getHttpsConfig(args);
 
 		Thread httpThread = new Thread(() -> {
 			int port = 80;
@@ -34,34 +38,55 @@ public class HTTPServer {
 				e.printStackTrace();
 			}
 		});
-
-		Thread httpsThread = new Thread(() -> {
-			int port = 443;
-			try (ServerSocket serverSocket = SSLServerSocketFactory.getDefault().createServerSocket(port)) {
-				System.setProperty("javax.net.ssl.keyStore", "keystore.jks");
-				System.setProperty("javax.net.ssl.keyStorePassword", "changeit");
-				System.out.println("HTTP Server running on port " + port);
-
-				// Infinite loop to listen for incoming connections
-				while (true) {
-					Socket clientSocket = serverSocket.accept();
-
-					// Create a new thread to handle the request
-					HttpRequestHandler requestHandler = new HttpRequestHandler(clientSocket);
-					Thread thread = new Thread(requestHandler);
-					thread.start();
-				}
-			} catch (IOException e) {
-				System.err.println("Server exception: " + e.getMessage());
-				e.printStackTrace();
-			}
-
-		});
-
 		httpThread.start();
-		httpsThread.start();
 
+		if (config != null) {
+			Thread httpsThread = new Thread(() -> {
+				int port = 443;
+				System.setProperty("javax.net.ssl.keyStore", config.path);
+				System.setProperty("javax.net.ssl.keyStorePassword", config.password);
+				try (SSLServerSocket serverSocket = (SSLServerSocket) SSLServerSocketFactory.getDefault().createServerSocket(port)) {
+					System.out.println("HTTP Server running on port " + port);
+
+					// Infinite loop to listen for incoming connections
+					while (true) {
+						SSLSocket clientSocket = (SSLSocket) serverSocket.accept();
+
+						// Create a new thread to handle the request
+						HttpRequestHandler requestHandler = new HttpRequestHandler(clientSocket);
+						Thread thread = new Thread(requestHandler);
+						thread.start();
+					}
+				} catch (IOException e) {
+					System.err.println("Server exception: " + e.getMessage());
+					e.printStackTrace();
+				}
+
+			});
+			httpsThread.start();
+		}
 	}
+
+	private static HttpsConfig getHttpsConfig(String[] args) {
+
+		if (args.length != 2) {
+			if (args.length > 0) {
+				System.err.println("Starting on HTTP-only mode. Please provide both a keystore path and password!");
+			}
+			return null;
+		}
+
+		HttpsConfig httpsConfig = new HttpsConfig();
+		httpsConfig.path = args[0];
+		httpsConfig.password = args[1];
+		return httpsConfig;
+	}
+
+}
+
+class HttpsConfig {
+	public String path;
+	public String password;
 }
 
 class HttpRequestHandler implements Runnable {
@@ -88,6 +113,15 @@ class HttpRequestHandler implements Runnable {
 
 			System.out.println("Received request: " + requestLine);
 
+			if (requestLine.isBlank()) {
+				System.out.println("Empty request");
+				HttpResponse response = new HttpResponse(HttpResponseCode.BAD_REQUEST, null);
+				System.out.println("Response line: " + response);
+				os.writeBytes(response.toString());
+				os.flush();
+				return;
+			}
+
 			// Now that I've received the whole request line I'm going to parse the request into an HttpRequest object.
 			HttpRequest request;
 			try {
@@ -96,12 +130,12 @@ class HttpRequestHandler implements Runnable {
 				HttpResponse response = new HttpResponse(HttpResponseCode.BAD_REQUEST, null);
 				System.out.println("Response line: " + response);
 				os.writeBytes(response.toString());
-				throw new IOException("Bad request");
+				throw new IOException("Bad request", e);
 			} catch (UnsupportedOperationException e) {
 				HttpResponse response = new HttpResponse(HttpResponseCode.METHOD_NOT_ALLOWED, null);
 				System.out.println("Response line: " + response);
 				os.writeBytes(response.toString());
-				throw new IOException("Unsupported method");
+				throw new IOException("Unsupported method", e);
 			}
 
 			HttpResponse response = handleRequest(request);
@@ -206,10 +240,10 @@ class HttpRequestHandler implements Runnable {
 // This class is just constants used for sending responses back
 enum HttpResponseCode {
 	OK(200, "OK", null),
-	BAD_REQUEST(400, "BAD REQUEST", Paths.get("400.html")),
+	BAD_REQUEST(400, "BAD_REQUEST", Paths.get("400.html")),
 	FORBIDDEN(403, "FORBIDDEN", Paths.get("403.html")),
-	NOT_FOUND(404, "NOT FOUND", Paths.get("404.html")),
-	METHOD_NOT_ALLOWED(405, "METHOD NOT ALLOWED", Paths.get("403.html"));
+	NOT_FOUND(404, "NOT_FOUND", Paths.get("404.html")),
+	METHOD_NOT_ALLOWED(405, "METHOD_NOT_ALLOWED", Paths.get("403.html"));
 
 	public final int statusCode;
 	public final String statusMessage;
