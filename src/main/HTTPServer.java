@@ -347,7 +347,7 @@ class HttpResponse {
 // Method constants
 enum HttpMethod {
 
-	GET("GET"), POST("POST"), UNSUPPORTED("");
+	GET("GET"), UNSUPPORTED("");
 
 	public final String methodName;
 
